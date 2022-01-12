@@ -27,6 +27,7 @@ R__LOAD_LIBRARY(libDelphesO2)
 #include "DetectorsBase/Propagator.h"
 #include "DetectorsBase/GeometryManager.h"
 #include "DataFormatsFT0/RecPoints.h"
+#include "Framework/DataTypes.h"
 
 // DelphesO2 includes
 #include "TrackSmearer.hh"
@@ -34,7 +35,6 @@ R__LOAD_LIBRARY(libDelphesO2)
 #include "RICHdetector.hh"
 #include "ECALdetector.hh"
 #include "PhotonConversion.hh"
-#include "PreShower.hh"
 #include "MIDdetector.hh"
 #include "TrackUtils.hh"
 
@@ -193,9 +193,6 @@ int createO2tables(const char* inputFile = "delphes.root",
   o2::delphes::PhotonConversion photon_conversion;
   TLorentzVector photonConv;
 
-  // PreShower detector
-  o2::delphes::PreShower pre_shower;
-  pre_shower.setup();
 
   // MID detector
   o2::delphes::MIDdetector mid_detector;
@@ -216,7 +213,6 @@ int createO2tables(const char* inputFile = "delphes.root",
   MakeTreeO2ecal();
   MakeTreeO2frich();
   MakeTreeO2photon();
-  MakeTreeO2pres();
   MakeTreeO2mid();
   MakeTreeO2collision();
   MakeTreeO2collisionExtra();
@@ -274,7 +270,9 @@ int createO2tables(const char* inputFile = "delphes.root",
       mcparticle.fStatusCode = particle->Status;
       mcparticle.fFlags = 0;
       if (IsSecondary(particles, iparticle)) {
-        mcparticle.fFlags |= 1;
+        mcparticle.fFlags |= o2::aod::mcparticle::enums::ProducedByTransport;
+      } else {
+        mcparticle.fFlags |= o2::aod::mcparticle::enums::PhysicalPrimary;
       }
       mcparticle.fIndexMcParticles_Mother0 = particle->M1;
       if (mcparticle.fIndexMcParticles_Mother0 > -1)
@@ -309,10 +307,6 @@ int createO2tables(const char* inputFile = "delphes.root",
       if constexpr (enable_ecal) {
         float posZ, posPhi;
         if (ecal_detector.makeSignal(*particle, pECAL, posZ, posPhi)) { // to be updated 13.09.2021
-          printf("ECAL particle: pid=%d, p=(%g,%g,%g,%g), posZ=%f, posPhi=%f\n",
-                 particle->PID, particle->Px, particle->Py, particle->Pz, particle->E, posZ, posPhi);
-          printf("ECAL p=(%g,%g,%g,%g)\n",
-                 pECAL.Px(), pECAL.Py(), pECAL.Pz(), pECAL.E());
           ecal.fIndexCollisions = ientry + eventOffset;
           ecal.fIndexMcParticles = TMath::Abs(iparticle + fOffsetLabel);
           ecal.fPx = pECAL.Px();
@@ -541,13 +535,6 @@ int createO2tables(const char* inputFile = "delphes.root",
         ftof_tracks_indices.push_back(std::pair<int, int>{ientry + eventOffset, fTrackCounter});
       }
 
-      // check if has Preshower
-      if (pre_shower.hasPreShower(*track)) {
-        pres.fIndexCollisions = ientry + eventOffset;
-        pres.fIndexTracks = fTrackCounter; // Index in the Track table
-        pres.fPresIsElectron = pre_shower.isElectron(*track, multiplicity);
-        FillTree(kPres);
-      }
 
       // check if it is within the acceptance of the MID
       if (isMID) {
