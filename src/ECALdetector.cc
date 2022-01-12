@@ -1,3 +1,4 @@
+
 /// @author: Yuri Kharlov
 /// @author: Nicolo' Jacazio <nicolo.jacazio@cern.ch>
 /// @since 04/09/2021
@@ -51,7 +52,7 @@ bool ECALdetector::makeSignal(const GenParticle& particle,
   // and hit coordinates posZ, posPhi
 
   const int pid = particle.PID;
-  if (pid != 22) { // only photons are treated so far. e+- and MIPs will be added later.
+  if (pid != 22 || particle.Charge == 0) { // skip non-photons or neutral particles
     return false;
   }
 
@@ -71,9 +72,25 @@ bool ECALdetector::makeSignal(const GenParticle& particle,
     posZ   = mRadius / tanTheta; // z-coodrinate  of a photon hit
   }
 
-  p4ECAL = smearPhotonP4(p4True);
-
-  return true;
+  if (pid == 22) {// photons
+    p4ECAL = smearPhotonP4(p4True);
+    return true;
+  }
+  else if (TMath::Abs(pid) == 11) { // electrons
+    // Note that electrons are treated similar to photons, i.e. propagated to ECAL 
+    // along straight line which is wrong. Propagation in magnetic field is to be implemented yet.
+    p4ECAL = smearPhotonP4(p4True);
+    return true;
+  }
+  else if (TMath::Abs(pid) ==   13 ||
+	   TMath::Abs(pid) ==  211 ||
+	   TMath::Abs(pid) ==  321 ||
+	   TMath::Abs(pid) == 2212) { // other stable charged particles
+    p4ECAL = smearMIPP4(p4True);
+    return true;
+  }
+    
+  return false;
 }
 
 /*****************************************************************/
@@ -86,8 +103,29 @@ TLorentzVector ECALdetector::smearPhotonP4(const TLorentzVector& pTrue)
   Double_t eTrue = pTrue.E();
   Double_t eSmeared = smearPhotonE(eTrue);
   // Smear direction of 3-vector
-  Double_t phi = pTrue.Phi() + gRandom->Gaus(0., sigmaX(eTrue) / mRadius);
+  Double_t phi   = pTrue.Phi() + gRandom->Gaus(0., sigmaX(eTrue) / mRadius);
   Double_t theta = pTrue.Theta() + gRandom->Gaus(0., sigmaX(eTrue) / mRadius);
+  // Calculate smeared components of 3-vector
+  Double_t pxSmeared = eSmeared * TMath::Cos(phi) * TMath::Sin(theta);
+  Double_t pySmeared = eSmeared * TMath::Sin(phi) * TMath::Sin(theta);
+  Double_t pzSmeared = eSmeared * TMath::Cos(theta);
+  // Construct new 4-momentum from smeared energy and 3-momentum
+  TLorentzVector pSmeared(pxSmeared, pySmeared, pzSmeared, eSmeared);
+  return pSmeared;
+}
+/*****************************************************************/
+TLorentzVector ECALdetector::smearMIPP4(const TLorentzVector& pTrue)
+{
+  // This function smears the charged particle 4-momentum from the true one via applying
+  // Landau distribution of MIP energy
+
+  // Get true energy from true 4-momentum and smear this energy
+  const Double_t eMIP = 0.280; // 280 MeV is MIP in ECAL
+  const Double_t sMIP = 0.020; // Landau sigma
+  Double_t eSmeared = gRandom->Landau(eMIP,sMIP);
+  // Smear direction of 3-vector
+  Double_t phi   = pTrue.Phi() + gRandom->Gaus(0., sigmaX(eSmeared) / mRadius);
+  Double_t theta = pTrue.Theta() + gRandom->Gaus(0., sigmaX(eSmeared) / mRadius);
   // Calculate smeared components of 3-vector
   Double_t pxSmeared = eSmeared * TMath::Cos(phi) * TMath::Sin(theta);
   Double_t pySmeared = eSmeared * TMath::Sin(phi) * TMath::Sin(theta);
