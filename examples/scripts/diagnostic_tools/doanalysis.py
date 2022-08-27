@@ -7,13 +7,15 @@ Several analyses are implemented already, you can pick yours and run e.g.:
 `./doanalysis.py TrackQA -i ../AODRun5.0.root`
 Results will be available for each batch of files in the `AnalysisResults` directory.
 You can check the help of the script (i.e. `./doanalysis.py --h`) to have information on the available options and workflows.
+Author: Nicolò Jacazio, nicolo.jacazio@cern.ch
 """
 
 import configparser
 from itertools import islice
 import os
-from ROOT import TFile
 from common import bcolors, msg, fatal_msg, verbose_msg, run_in_parallel, set_verbose_mode, get_default_parser, warning_msg, run_cmd, print_all_warnings
+from ROOT import TFile
+import datetime
 
 
 def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-kine:4,qa-tracking-resolution:4"],
@@ -25,8 +27,7 @@ def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-
                                   "QAResults.root"],
                     dpl_configuration_file=None,
                     resume_previous_analysis=False,
-                    write_runner_script=True,
-                    analysis_timeout=None):
+                    write_runner_script=True):
     """
     Function to prepare everything you need for your O2 analysis.
     From the output folder to the script containing the O2 workflow.
@@ -68,6 +69,7 @@ def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-
         write_instructions(f"cd {output_path} || exit 1", n=2)
         # Print run dir
         write_instructions(f"pwd", n=2)
+        write_instructions(f"echo Running \"$0\"", n=2)
 
         def get_tagged_output_file(output_file_name):
             return output_file_name.replace(".root", f"_{tag}.root")
@@ -79,22 +81,22 @@ def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-
                 write_instructions(
                     f"[ -f {i} ] && echo 'file {i} already present, continuing' && exit 0")
             else:
-                write_instructions(f"[ -f {i} ] && rm -v {i}.root 2>&1")
+                write_instructions(f"[ -f {i} ] && rm -v {i} 2>&1")
         write_instructions("")
 
         o2_workflow = ""
-        if analysis_timeout is not None:
-            o2_workflow = f"timeout {analysis_timeout} "
         for i in o2_analyses:
             line = f"{i} {o2_arguments}"
             if i == o2_analyses[0]:
                 line += f" --aod-file {input_file}"
             if dpl_configuration_file is not None:
-                line += f" --configuration json://{dpl_configuration_file}"
+                line += f" --configuration json://{os.path.normpath(dpl_configuration_file)}"
             if len(o2_analyses) > 1 and i != o2_analyses[-1]:
                 line = f"{line} | \\\n \t"
             else:
                 line = f"{line}"
+            if line.count("configuration") > 1:
+                fatal_msg("Cannot have more than one configuration")
             o2_workflow += line
 
         write_instructions(f"O2Workflow=\"{o2_workflow}\"", n=2)
@@ -107,7 +109,10 @@ def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-
         write_instructions("  eval \"${O2Workflow}\"")
         write_instructions("fi")
 
-        for i in ["ERROR", "FATAL"]:
+        # Print run dir
+        write_instructions("pwd")
+
+        for i in ["ERROR", "FATAL", "crash"]:
             write_instructions(
                 f"if grep -q \"\[{i}\]\" {log_file}; then echo \": got some {i}s in '{log_file}'\" && exit 1; fi")
         write_instructions("")
@@ -116,15 +121,43 @@ def set_o2_analysis(o2_analyses=["o2-analysis-hf-task-d0 --pipeline qa-tracking-
             write_instructions(
                 f"[ -f {i} ] && mv {i} {get_tagged_output_file(i)} 2>&1")
 
+        write_instructions(f"date", n=2)
+        write_instructions(f"echo Completed \"$0\"", n=2)
+
         write_instructions("\nexit 0")
     return tmp_script_name
 
 
-def run_o2_analysis(tmp_script_name, remove_tmp_script=False, explore_bad_files=True):
+do_bash_script = False
+bash_parallel_jobs = 1
+
+
+def run_o2_analysis(tmp_script_name,
+                    remove_tmp_script=False,
+                    explore_bad_files=False,
+                    time_it=True):
+    global number_of_runs
     verbose_msg("> starting run with", tmp_script_name)
     cmd = f"bash {tmp_script_name}"
+    if do_bash_script:
+        with open("parallelbash.sh", "a") as fout:
+            with open("parallelbash.sh", "r") as fin:
+                lastline = fin.readlines()[-1]
+                if lastline.startswith("#"):
+                    lastline = int(lastline.strip("#"))
+                else:
+                    lastline = 0
+                fout.write(f"echo Running {lastline}\n")
+                fout.write(f"{cmd} &\n")
+                lastline += 1
+                if lastline % (bash_parallel_jobs+1) == 0:
+                    fout.write(f"wait\n")
+                fout.write(f"\n#{lastline}\n")
+
+        return
+
     if explore_bad_files:
-        if run_cmd(cmd, check_status=True, throw_fatal=False) == False:
+        if run_cmd(cmd, check_status=True, throw_fatal=False, time_it=time_it) == False:
             list_name = os.listdir(os.path.dirname(tmp_script_name))
             for i in list_name:
                 if "ListForRun5Analysis" in i:
@@ -138,7 +171,7 @@ def run_o2_analysis(tmp_script_name, remove_tmp_script=False, explore_bad_files=
             warning_msg("Issue when running",
                         tmp_script_name, "with", list_name)
     else:
-        run_cmd(cmd)
+        run_cmd(cmd, log_file=f"{tmp_script_name}.log", time_it=time_it)
     if remove_tmp_script:
         os.remove(tmp_script_name)
     verbose_msg("< end run with", tmp_script_name)
@@ -166,7 +199,12 @@ def main(mode,
          extra_arguments="",
          resume_previous_analysis=False,
          check_input_file_integrity=True,
-         analysis_timeout=None):
+         analysis_timeout=None,
+         linearize_single_core=True):
+    if do_bash_script:
+        njobs = 1
+        linearize_single_core = True
+
     if len(input_file) == 1:
         input_file = input_file[0]
     else:
@@ -179,7 +217,14 @@ def main(mode,
     else:
         msg("Merging output of", f"'{mode}'",
             "analysis", color=bcolors.BOKBLUE)
-    o2_arguments = f"-b --shm-segment-size {shm_mem_size} --aod-memory-rate-limit {rate_lim} --readers {readers}"
+    if analysis_timeout is not None:
+        msg("Using analysis timeout of", analysis_timeout,
+            "seconds", color=bcolors.BOKBLUE)
+        analysis_timeout = f"--time-limit {analysis_timeout}"
+    else:
+        analysis_timeout = ""
+
+    o2_arguments = f"-b --shm-segment-size {shm_mem_size} --aod-memory-rate-limit {rate_lim} --readers {readers} {analysis_timeout}"
     o2_arguments += extra_arguments
     if mode not in analyses:
         raise ValueError("Did not find analyses matching mode",
@@ -193,17 +238,17 @@ def main(mode,
         file_name_to_check = file_name_to_check.strip()
         if not os.path.isfile(file_name_to_check):
             warning_msg("File", file_name_to_check, "does not exist")
-            return 3
+            return "Does not exist"
         file_to_check = TFile(file_name_to_check, "READ")
         if not file_to_check.IsOpen():
             warning_msg("Cannot open AOD file:", file_name_to_check)
-            return 1
+            return "Cannot be open"
         elif file_to_check.TestBit(TFile.kRecovered):
             verbose_msg(file_name_to_check, "was a recovered file")
-            return 2
+            return "Was recovered"
         else:
             verbose_msg(file_name_to_check, "is OK")
-            return 0
+            return "Is Ok"
 
     def build_list_of_files(file_list):
         verbose_msg("Building list of files from", file_list)
@@ -213,21 +258,24 @@ def main(mode,
             # for i in file_list
             fatal_msg("Runlist has duplicated entries, fix runlist!",
                       len(unique_file_list), "unique files, while got", len(file_list), "files")
-        not_readable = []
-        recovered_files = []
+        file_status = {"Does not exist": [],
+                       "Cannot be open": [],
+                       "Was recovered": [],
+                       "Is Ok": []}
         if check_input_file_integrity:  # Check that input files can be open
             for i in file_list:
                 verbose_msg("Checking that TFile",
                             i.strip(), "can be processed")
-                file_sane_code = is_root_file_sane(i)
-                if file_sane_code == 1:
-                    not_readable.append(i)
-                elif file_sane_code == 2:
-                    recovered_files.append(i)
+                file_status[is_root_file_sane(i)] = i
+        recovered_files = file_status["Was recovered"]
+        not_readable = []
+        for i in file_status:
+            if i == "Is Ok":
+                continue
+            not_readable += file_status[i]
         if len(recovered_files) > 0:
             msg("Recovered", len(recovered_files),
                 "files:\n", )
-            not_readable = not_readable + recovered_files
         if len(not_readable) > 0:
             warning_msg(len(not_readable), "over", len(file_list),
                         "files cannot be read and will be skipped")
@@ -285,11 +333,29 @@ def main(mode,
                                         tag=tag,
                                         dpl_configuration_file=dpl_configuration_file,
                                         resume_previous_analysis=resume_previous_analysis,
-                                        write_runner_script=not merge_only,
-                                        analysis_timeout=analysis_timeout))
+                                        write_runner_script=not merge_only))
     if not merge_only:
+        if do_bash_script:
+            with open("parallelbash.sh", "w") as f:
+                f.write(f"#!/bin/bash\n\n")
+                f.write(f"echo \"Start running\"\n\n")
+                f.write(f"date\n\n")
+                f.write("""function trap_ctrlc (){
+                            # perform cleanup here
+                            echo "Ctrl-C caught...performing clean up"
+                            exit 2
+                        }\n\n""")
+                f.write("""trap "trap_ctrlc" 2\n""")
+
         run_in_parallel(processes=njobs, job_runner=run_o2_analysis,
-                        job_arguments=run_list, job_message="Running analysis")
+                        job_arguments=run_list, job_message=f"Running analysis, it's {datetime.datetime.now()}",
+                        linearize_single_core=linearize_single_core)
+        if do_bash_script:
+            with open("parallelbash.sh", "a") as f:
+                f.write(f"wait\n\n")
+                f.write(f"date\n\n")
+            msg("Now run bash script `bash parallelbash.sh`")
+            return
         if clean_localhost_after_running:
             run_cmd(
                 "find /tmp/ -maxdepth 1 -name localhost* -user $(whoami) | xargs rm -v 2>&1",
@@ -309,7 +375,7 @@ def main(mode,
         # List of files to be merged per type that are not declared sane
         non_sane_files_per_type = {}
         for i in files_to_merge:
-            if is_root_file_sane(i) != 0:
+            if is_root_file_sane(i) != "Is Ok":
                 non_sane_files_per_type[fn].setdefault(fn, []).append(i)
                 warning_msg("Result file", i, "is not sane")
                 continue
@@ -405,8 +471,10 @@ if __name__ == "__main__":
                         action="store_true", help="Flag avoid running the analysis and to merge the output files into one")
     parser.add_argument("--show", "-s",
                         action="store_true", help="Flag to show the workflow of the current tag")
-    parser.add_argument("--no_clean", "-nc",
+    parser.add_argument("--no_clean", "--noclean", "-nc",
                         action="store_true", help="Flag to avoid cleaning the localhost files after running")
+    parser.add_argument("--do_bash_script", "-P",
+                        action="store_true", help="Flag to create a bash script that runs all the tasks in cascade")
     parser.add_argument("--resume_previous_analysis", "--continue_analysis", "--resume_analysis", "--continue",
                         action="store_true",
                         help="Flag to continue the analysis from the input files that have been already built and not overwriting the output results")
@@ -415,6 +483,10 @@ if __name__ == "__main__":
                         help="Flag to avoid checking the input file integrity so as to gain time")
     args = parser.parse_args()
     set_verbose_mode(args)
+
+    # Set bash script mode
+    do_bash_script = args.do_bash_script
+    bash_parallel_jobs = args.njobs
 
     # Load analysis workflows
     workflows = configparser.RawConfigParser()

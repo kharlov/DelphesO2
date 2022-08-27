@@ -2,7 +2,7 @@
 
 """
 Common header for AOD python scripts
-Author: Nicolo' Jacazio, nicolo.jacazio@cern.ch
+Author: Nicolò Jacazio, nicolo.jacazio@cern.ch
 """
 
 import argparse
@@ -11,10 +11,6 @@ import multiprocessing
 import sys
 import os
 import datetime
-try:
-    import tqdm
-except ImportError as e:
-    print("Module tqdm is not imported. Progress bar will not be available (you can install tqdm for the progress bar)")
 
 
 # Global running flags
@@ -26,13 +22,14 @@ def set_verbose_mode(parser):
     verbose_mode = parser.verbose
 
 
-def get_default_parser(description):
+def get_default_parser(description, njobs=True):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--verbose", "-v",
                         action="store_true", help="Verbose mode.")
-    parser.add_argument("--njobs", "--jobs", "-j", type=int,
-                        default=10,
-                        help="Number of concurrent jobs, by default 10.")
+    if njobs:
+        parser.add_argument("--njobs", "--jobs", "-j", type=int,
+                            default=10,
+                            help="Number of concurrent jobs, by default 10.")
     return parser
 
 
@@ -66,7 +63,12 @@ def fatal_msg(*args, fatal_message="Fatal Error!"):
     raise RuntimeError(fatal_message)
 
 
-list_of_warnings = multiprocessing.Manager().list()
+list_of_warnings = []
+try:
+    list_of_warnings = multiprocessing.Manager().list()
+except:
+    verbose_msg("Could not load warnings from manager",
+                "Will not be printed from parallel processing")
 
 
 def warning_msg(*args, add=True):
@@ -81,6 +83,13 @@ def print_all_warnings():
         warning_msg("There were some warnings", add=False)
         for i in list_of_warnings:
             warning_msg(*i, add=False)
+
+
+try:
+    import tqdm
+except ImportError as e:
+    verbose_msg("Module tqdm is not imported.",
+                "Progress bar will not be available (you can install tqdm for the progress bar)")
 
 
 def run_in_parallel(processes, job_runner, job_arguments, job_message, linearize_single_core=False, force_no_progress_line=False):
